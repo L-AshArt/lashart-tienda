@@ -1,0 +1,25 @@
+name: 🌸 Bootstrap Tienda
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generar archivos del proyecto
+        run: python3 setup.py
+
+      - name: Commit y push de todos los archivos
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git status
+          git commit -m "✨ Bootstrap: L-Ash Art Tienda en Línea" || echo "Sin cambios"
+          git push
