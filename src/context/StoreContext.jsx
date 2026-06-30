@@ -1,62 +1,89 @@
 import { createContext, useContext, useState, useEffect } from 'react'
 
-const PRODS_URL = 'https://firestore.googleapis.com/v1/projects/lashart-b86d4/databases/(default)/documents/lashArt/prods'
+// TODO: si el catálogo supera 300 docs, implementar paginación con
+// pageToken en lugar de aumentar pageSize indefinidamente
+const PRODUCTS_URL = 'https://firestore.googleapis.com/v1/projects/lashart-b86d4/databases/(default)/documents/products?pageSize=300'
 const Ctx = createContext(null)
 
-function buildNombre(p) {
-  const marca = p.marca ? `${p.marca} ` : ''
-  const notas = p.notas ? ` (${p.notas})` : ''
-  switch (p.tipo) {
-    case 'clasica':  return `${marca}Clásica ${p.grosor} Curva ${p.curva} ${p.largo}${notas}`.trim()
-    case 'tec':      return `${marca}Tec ${p.dimension||p.dimensionLabel||''} Curva ${p.curva} ${p.largo}${notas}`.trim()
-    case 'abanico':  return `${marca}Abanico ${p.dimension||''} ${p.grosor} Curva ${p.curva}${notas}`.trim()
-    case 'adhesivo': return `${marca}${p.nombre||''}${notas}`.trim()
-    case 'pinza':    return `${marca}${p.subtipo||''}${notas}`.trim()
-    default:         return (p.nombre || p.subtipo || `Producto ${p.id}`) + notas
+// Convierte Firestore REST wire format → JS plano (recursivo)
+function decode(fields) {
+  const out = {}
+  for (const [k, v] of Object.entries(fields || {})) {
+    if      ('stringValue'  in v) out[k] = v.stringValue
+    else if ('integerValue' in v) out[k] = Number(v.integerValue)
+    else if ('doubleValue'  in v) out[k] = v.doubleValue
+    else if ('booleanValue' in v) out[k] = v.booleanValue
+    else if ('nullValue'    in v) out[k] = null
+    else if ('mapValue'     in v) out[k] = decode(v.mapValue.fields || {})
+    else if ('arrayValue'   in v) out[k] = (v.arrayValue.values || []).map(el => decode({ _: el })._)
   }
+  return out
 }
 
-function buildCategoria(p) {
-  const map = {
-    clasica:'Pestañas Clásicas', tec:'Tecnológicas', abanico:'Abanico',
-    adhesivo:'Adhesivos', pinza:'Pinzas', insumo:'Insumos', otro:'Otros',
-  }
-  return map[p.tipo] || p.tipo
+// Añade el distinguidor de variante al nombre base del documento
+function variantNombre(base, v) {
+  if (v.largo) return `${base} ${v.largo === 'Mix' ? 'Mix' : `${v.largo}mm`}`
+  if (v.color) return `${base} ${v.color}`
+  return base
 }
 
-function buildDescripcion(p) {
+function buildDesc(doc, v) {
   const parts = []
-  if (p.grosor)    parts.push(`Grosor ${p.grosor}`)
-  if (p.curva)     parts.push(`Curva ${p.curva}`)
-  if (p.largo && p.largo !== 'Mix') parts.push(`Largo ${p.largo}mm`)
-  if (p.largo === 'Mix')            parts.push('Largos mixtos')
-  if (p.dimension) parts.push(p.dimension)
-  if (p.marca)     parts.push(`Marca ${p.marca}`)
-  if (p.notas)     parts.push(p.notas)
+  if (v?.diametro)                   parts.push(`Diámetro ${v.diametro}`)
+  if (v?.curva)                      parts.push(`Curva ${v.curva}`)
+  if (v?.largo && v.largo !== 'Mix') parts.push(`Largo ${v.largo}mm`)
+  if (v?.largo === 'Mix')            parts.push('Largos mixtos')
+  if (v?.dimension)                  parts.push(v.dimension)
+  if (doc.marca)                     parts.push(`Marca ${doc.marca}`)
   return parts.join(' · ')
 }
 
-function transformProduct(p) {
-  return {
-    id:             String(p.id),
-    nombre:         buildNombre(p),
-    categoria:      buildCategoria(p),
-    precio:         Number(p.precioMenudeo || 0),
-    precio_mayoreo: Number(p.precioMayoreo || 0),
-    min_mayoreo:    Number(p.minMayoreo    || 0),
-    stock:          Number(p.stock || 0),
-    imagen:         p.imagen || '',
-    descripcion:    buildDescripcion(p),
-    // campos originales para el agrupamiento en catálogo
-    tipo:      p.tipo,
-    marca:     p.marca     || '',
-    grosor:    p.grosor    || '',
-    curva:     p.curva     || '',
-    largo:     p.largo     || '',
-    dimension: p.dimension || p.dimensionLabel || '',
-    subtipo:   p.subtipo   || '',
-    store_visible: p.store_visible !== false,
+// Expande un documento de products/ a uno o varios objetos planos
+function expandDoc(docId, doc) {
+  const base = {
+    categoria:     doc.familia || '',
+    tipo:          doc.tipo    || '',
+    marca:         doc.marca   || '',
+    imagen:        doc.imagen  || '',
+    store_visible: doc.store_visible !== false,
+    subtipo:       '',
   }
+
+  if (doc.variants) {
+    // Producto con variantes → un objeto plano por variante
+    return Object.entries(doc.variants).map(([vk, v]) => ({
+      ...base,
+      id:             `${docId}__${vk}`,
+      nombre:         variantNombre(doc.nombre, v),
+      precio:         Number(v.precio_menudeo  || 0),
+      precio_mayoreo: Number(v.precio_mayoreo  || 0),
+      min_mayoreo:    Number(v.min_mayoreo      || 0),
+      stock:          Number(v.stock_local      || 0),
+      descripcion:    buildDesc(doc, v),
+      grosor:         v.diametro  || '',  // ponytail: migration renamed grosor→diametro; FibraCatalog reads grosor
+      curva:          v.curva     || '',
+      largo:          v.largo     || '',
+      dimension:      v.dimension || '',
+    }))
+  }
+
+  // Standalone → un solo objeto plano
+  // tec_solo sin dimension propia: 'Especial' para que FibraCatalog los muestre agrupados
+  const dimension = doc.dimension || (doc.tipo === 'tec' ? 'Especial' : '')
+  return [{
+    ...base,
+    id:             docId,
+    nombre:         doc.nombre,
+    precio:         Number(doc.precio_menudeo  || 0),
+    precio_mayoreo: Number(doc.precio_mayoreo  || 0),
+    min_mayoreo:    Number(doc.min_mayoreo      || 0),
+    stock:          Number(doc.stock_local      || 0),
+    descripcion:    buildDesc(doc, null),
+    grosor:         '',
+    curva:          '',
+    largo:          '',
+    dimension,
+  }]
 }
 
 export function StoreProvider({ children }) {
@@ -69,16 +96,21 @@ export function StoreProvider({ children }) {
   async function fetchProducts() {
     setLoading(true)
     try {
-      const res  = await fetch(PRODS_URL)
+      const res  = await fetch(PRODUCTS_URL)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const doc  = await res.json()
-      const raw  = JSON.parse(doc.fields.d.stringValue)
-      const mapped = raw.map(transformProduct).filter(p => p.precio > 0)
-      setProducts(mapped)
+      const data = await res.json()
+      const flat = (data.documents || [])
+        .flatMap(fsDoc => {
+          const id  = fsDoc.name.split('/').at(-1)
+          const doc = decode(fsDoc.fields)
+          return expandDoc(id, doc)
+        })
+        .filter(p => p.precio > 0)
+      setProducts(flat)
     } catch (e) {
       console.error('StoreContext:', e)
       setError(e.message)
-      setProducts(DEMO)
+      setProducts([])
     } finally {
       setLoading(false)
     }
@@ -96,7 +128,7 @@ export function StoreProvider({ children }) {
 }
 export const useStore = () => useContext(Ctx)
 
-const DEMO = [
-  { id:'d1', nombre:'Clásica 0.07 Curva D Mix', categoria:'Pestañas Clásicas', precio:70, precio_mayoreo:60, min_mayoreo:5, stock:4, imagen:'', descripcion:'Grosor 0.07 · Curva D', tipo:'clasica', marca:'', grosor:'0.07', curva:'D', largo:'Mix', dimension:'', store_visible:true },
-  { id:'d2', nombre:'Golle Negro',               categoria:'Adhesivos',         precio:250,precio_mayoreo:0, min_mayoreo:0, stock:2, imagen:'', descripcion:'Marca Golle', tipo:'adhesivo', marca:'Golle', grosor:'', curva:'', largo:'', dimension:'', store_visible:true },
-]
+// const DEMO = [
+//   { id:'d1__v_mix', nombre:'Nagaraku Clásica Diámetro 0.07 Curva D Mix', categoria:'Pestañas Clásicas', precio:70, precio_mayoreo:60, min_mayoreo:5, stock:4, imagen:'', descripcion:'Diámetro 0.07 · Curva D · Largos mixtos', tipo:'clasica', marca:'', grosor:'0.07', curva:'D', largo:'Mix', dimension:'', subtipo:'', store_visible:true },
+//   { id:'d2',        nombre:'Golle Negro',                                  categoria:'Adhesivos',         precio:250,precio_mayoreo:0, min_mayoreo:0, stock:2, imagen:'', descripcion:'Marca Golle',                                tipo:'adhesivo', marca:'Golle', grosor:'',     curva:'',  largo:'',    dimension:'', subtipo:'', store_visible:true },
+// ]
