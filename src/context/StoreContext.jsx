@@ -106,6 +106,9 @@ export function StoreProvider({ children }) {
           return expandDoc(id, doc)
         })
         .filter(p => p.precio > 0)
+      // ponytail: diag temporal — borrar tras confirmar valores
+      const sample = flat.find(p => p.grosor) || flat[0]
+      console.log('[StoreContext diag] total:', flat.length, '| muestra:', { id: sample?.id, grosor: sample?.grosor, stock: sample?.stock, precio: sample?.precio, tipo: sample?.tipo })
       setProducts(flat)
     } catch (e) {
       console.error('StoreContext:', e)
